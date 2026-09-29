@@ -203,7 +203,7 @@ Values below are the **measured reality** for the current `./data` (re-measure i
 [DATASET] missing image refs dropped: 85   (see detail list below)   corrupt images dropped: 0
 [DATASET] gif images flattened to first frame: 76   (failed: 0)
 [DATASET] images downscaled for size: 0   (long-edge cap: 4096)
-[DATASET] empty/near-empty content rows: 0
+[DATASET] empty/near-empty content rows: 25   (17 empty + 8 near-empty; all named with reason per §2.3 C1 guard, see REPORT.md — the embedder falls back to `text` for those per SPEC_Model_Embedding.md §5.2)
 [DATASET] alignment check: len(images)==len(image_refs) for all rows: PASS
 [DATASET] empty-list round-trip (empty + non-empty rows, sampled): PASS
 [DATASET] MISSING IMAGE REFS (detail, one line each)

@@ -22,18 +22,26 @@ The goal is a **retrieval** pipeline — not a fine-tuning job:
 ```text
 instar-search-agent/
 ├── AGENTS.md                    ← you are here; the source of truth for "how to work here"
+├── README.md                    ← user-facing docs: what it does, how to run it, how the scripts work
+├── README.txt                   ← dev scratch notes (run commands, GPU status); not documentation
 ├── SPEC_Dataset_Creation.md     ← AUTHORITATIVE: build ./data → ./hf_dataset (HF datasets)
 ├── SPEC_Model_Embedding.md      ← AUTHORITATIVE: build embedding index + retrieval smoke test
-├── build_dataset.py             ← Stage-1 IMPLEMENTATION (done; spec §5) — turns ./data into ./hf_dataset
-├── hf_dataset/                  ← Stage-1 OUTPUT (done): 5 Parquet shards + README + REPORT
-├── data/                        ← READ-ONLY raw source: ~1,067 article dirs, each an index.mdx + 0..N images
-└── research/                    ← BACKGROUND / reference; do NOT treat as instructions
+├── build_dataset.py             ← Stage-1 IMPLEMENTATION (done; spec §5) — ./data → ./hf_dataset
+├── run_embeddings.py            ← Stage-2 IMPLEMENTATION (done; spec §7) — ./hf_dataset → ./embeddings
+├── data/                        ← READ-ONLY raw source (git-ignored): 1,067 article dirs, each index.mdx + 0..N images (~853 MB)
+├── hf_dataset/                  ← Stage-1 OUTPUT (git-ignored, generated): 5 Parquet shards + README + REPORT (~560 MB)
+├── embeddings/                  ← Stage-2 OUTPUT (git-ignored, generated): .safetensors index + REPORTs + progress sidecar (~4 MB)
+├── models/                      ← Stage-2 INPUT (git-ignored, generated): auto-downloaded local snapshot of the frozen embed model (~3.2 GB)
+├── .venv/                       ← Python virtualenv with the pinned runtime (git-ignored; deps per SPEC_Model_Embedding.md §1)
+└── research/                    ← BACKGROUND / reference (git-ignored); do NOT treat as instructions
     ├── hugging_face_multimodal_rag_tutorial.ipynb   ← the notebook we are adapting (RAG, not training)
     ├── multimodal_rag_tutorial.txt                   ← plain-text copy of the notebook
     ├── Prompt_Dataset.md            ← SUPERSEDED by SPEC_Dataset_Creation.md (intent kept, details fixed)
     ├── Prompt_Training.md           ← SUPERSEDED (wrong "fine-tune the LLM" framing); do not follow
     └── README.md                    ← exploratory notes
 ```
+
+**What a fresh clone contains (git-tracked):** exactly the docs + the two scripts + `data/.gitexists` (keeps the empty `data/` dir). All generated folders (`hf_dataset/`, `embeddings/`, `models/`, `.venv/`) are created by the pipeline itself — `models/` is downloaded by `run_embeddings.py` on first use when missing (see §4, model bullet).
 
 **Rules for paths:**
 - `data/` is the **input**. Treat it as immutable source. Do not write into `data/`.
@@ -83,6 +91,7 @@ Do not assume. These are measured facts; re-measure if the corpus changes, but d
 - Embedding: **`nvidia/llama-nemotron-embed-vl-1b-v2`**, a **frozen** vision-language embedding model. Loaded `bfloat16`, `attn_implementation="sdpa"`, `trust_remote_code=True`. Exact path + revision live in `SPEC_Model_Embedding.md` §2 — take them from there, do not paraphrase a different model.
 - It exposes `encode_documents(images=..., texts=...)` for **documents** and `encode_queries([...])` for **text queries** / `encode_documents(images=[query])` for an **image query**. Preserve that asymmetry.
 - **It is not trained.** It produces a vector per (text, image(s)) pair. Done.
+- **Host constraint (measured on the build host):** this host **cannot reach `huggingface.co`** (connection unreachable). `run_embeddings.py::ensure_model_snapshot()` therefore: **skips the download** when `models/llama-nemotron-embed-vl-1b-v2-5b5ca69/` already holds `model.safetensors` + `config.json`; otherwise downloads the pinned `EMBED_MODEL_PATH @ EMBED_COMMIT_HASH`, trying `huggingface.co` first and falling back to the mirror `https://hf-mirror.com` (both overridable via `$HF_ENDPOINT` / `$HF_FALLBACK_ENDPOINT`). Verified 2026-09-29: primary failed, mirror delivered the full 3.36 GB snapshot (~303 s), and loading from the local snapshot worked.
 - The tutorial's optional rerank (`nvidia/...-rerank-vl-1b-v2`) and generation (`Qwen/Qwen3-VL-2B-Instruct`) models are **not required** to build the index. They are Stage 3 niceties, off by default, opt-in only.
 
 ---
@@ -134,26 +143,29 @@ A task is complete when **all** of the following hold, and nothing in §5.1 was 
 
 ## 7. How to actually get started (agent or human)
 
-Current state: **Stage 1 is implemented and verified** — `build_dataset.py` exists, `./hf_dataset` exists and its hard gate + spec-4 handoff smoke test pass (see `./hf_dataset/REPORT.md`). **Stage 2 is not started** — `run_embeddings.py` does not yet exist.
+Current state (verified clean run, 2026-09-29): **both stages implemented and green.**
+- **Stage 1** — `build_dataset.py`: 1,067 rows, hard gate C1–C4 + spec-§4 handoff smoke test **PASS**, exit 0, ~138 s. Report: `hf_dataset/REPORT.md(.json)`.
+- **Stage 2** — `run_embeddings.py`: model auto-download via mirror (primary unreachable) ~303 s → 1,067×2,048 `bfloat16` index in `embeddings/instar_docs_v1_image_text.safetensors` (4.37 MB) in 379.7 s on an RTX 5090 (24 GB) → **`[RETRIEVAL] PASS`** (in-domain top-1 0.624, out-of-domain top-1 0.194, image-query top-1 0.853 on its own row). Report: `embeddings/REPORT_instar_docs_v1_image_text.md(.json)`.
 
 ```bash
 # 0) Read AGENTS.md (this file) top-to-bottom; then both SPEC files top-to-bottom.
 
-# 1) Verify Stage 1 (already done; re-run only if the corpus changed or the spec
-#    has been edited in a way that would change the dataset shape). Exits 0 iff
-#    the §3 gate + §4 smoke test pass.
-python3 build_dataset.py --data ./data --out ./hf_dataset
+# 1) Stage 1 — dataset creation (must exit 0 before Stage 2). Already built and
+#    deterministic; re-run only if ./data or SPEC_Dataset_Creation.md changed.
+#    Exits 0 iff the §3 gate + §4 handoff smoke test pass.
+.venv/bin/python build_dataset.py --data ./data --out ./hf_dataset
 
-# 2) Only if Stage 1 exited 0, implement + run Stage 2 (embedding index build +
-#    retrieval smoke test). The exact entrypoint and flags are in
-#    SPEC_Model_Embedding.md §7. As of writing, run_embeddings.py is *not yet
-#    in the repo*; Stage 1's report is the input contract.
-#   python3 run_embeddings.py \
-#       --dataset ./hf_dataset \
-#       --modality image_text \
-#       --multi-image native \
-#       --batch-size 8 \
-#       --embed-file ./embeddings/instar_docs_v1_image_text.safetensors
+# 2) Stage 2 — embedding index build + retrieval smoke test (only if Stage 1
+#    exited 0). First run on a fresh checkout auto-downloads the model snapshot
+#    into models/ (huggingface.co first, then $HF_FALLBACK_ENDPOINT mirror;
+#    skipped when the snapshot already exists). Verified runtime incl. download:
+#    ~6 min on the RTX 5090.
+.venv/bin/python run_embeddings.py \
+    --dataset ./hf_dataset \
+    --modality image_text \
+    --multi-image primary \
+    --batch-size 8 \
+    --embed-file ./embeddings/instar_docs_v1_image_text.safetensors
 
 # 3) If retrieval looks off, do NOT change the model. Re-run Stage 1's gate.
 #    If the gate still passes, the problem is in SPEC_Model_Embedding.md's

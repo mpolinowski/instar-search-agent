@@ -97,12 +97,15 @@ Key facts you must respect:
 - **Embedding call for a document** uses `encode_documents(images=[...], texts=[...])`. A **query** uses `encode_queries([query])` for text or `encode_documents(images=[query])` for an image. Keep that asymmetry — it is intentional.
 - The model is **frozen** (`.eval()`, `torch.inference_mode`). Never train it.
 - Embedding dim in the notebook is `2048`, dtype `bfloat16`. Assert the produced dim matches what you store.
+- **Model availability (host constraint, measured on the build host):** this host **cannot reach `huggingface.co`** (connection unreachable). `run_embeddings.py::ensure_model_snapshot()` therefore guarantees the local snapshot before any load: it **skips the download** when `models/llama-nemotron-embed-vl-1b-v2-5b5ca69/` already holds `model.safetensors` + `config.json`; otherwise it downloads the pinned `EMBED_MODEL_PATH @ EMBED_COMMIT_HASH`, trying `huggingface.co` first and falling back to the mirror `https://hf-mirror.com` (both overridable via `$HF_ENDPOINT` / `$HF_FALLBACK_ENDPOINT`; a partial snapshot is completed, not re-downloaded). Verified 2026-09-29: primary failed, mirror delivered the full 3.36 GB snapshot (~303 s at ~11 MB/s), and the local-snapshot load path worked.
 
 **Multi-image caveat (important for your data):** the notebook assumes **exactly one image per example** (`dataset["train"]["image"]` is a single PIL image). Your dataset has **0 to N images per row** (`images: list[Image]`). Before writing the loop, inspect the Nemotron processor/model to determine how it accepts multiple images for one document. Decide one of these and document it:
 - (A) the model/processor natively accepts `images=[img1, img2, ...]` for a single text → pass the list; **or**
 - (B) it does not → pick a documented strategy (e.g. concatenate/resize subimages into one canvas, or embed the primary image only + full text) and state the limitation explicitly.
 
 Do **not** silently collapse N images into one without reporting which strategy you used and why. If you cannot confirm multi-image support from the model docs/source, default to strategy (B) with a clear log line and make it configurable.
+
+**Decision for this corpus (implemented in `run_embeddings.py`):** strategy **(B)** — the model's processor natively rejects per-document image lists (`processing_llama_nemotron_vl.py load_image()` accepts exactly one PIL image / path / dict; a list raises `ValueError: Invalid image` — verified at runtime). **Default: `primary`** (embed `images[0]` in document order + the full cleaned text; rationale: with `max_input_tiles=6` + 1 thumbnail the model can only see ~6–7 tiles per document, so a 53-image article is indistinguishable mush in one `concat` canvas, while the first in-document image + full text is the stronger signal for this wiki-style corpus). Both strategies lose `images[1:]`; that limitation is logged once per run and reported (see §5.3 / AGENTS.md §5.1). `concat` remains an alternative; `native` is exposed for completeness and will abort the first batch on this model (documented).
 
 ---
 
@@ -269,24 +272,33 @@ Pass criteria (log a `[RETRIEVAL] PASS/FAIL` line):
 Produce a single runnable entry point (script or tightly-ordered cells), e.g. `run_embeddings.py`, whose flow is:
 
 ```text
-env/device report            (§1)
-load model + processor       (§2)
-load local HF dataset        (§3)
-verify dataset (gate)        (§4)
-embed-loop: load-or-create   (§5)
-retrieval smoke test         (§6)
+env/device report                  (§1)
+load local HF dataset              (§3)
+verify dataset (hard gate)         (§4)   ← hard-fails BEFORE any model work (per §4)
+ensure model snapshot (skip-if-present / HF-primary / mirror-fallback)   (§2 availability note)
+load model + processor             (§2)
+embed-loop: load-or-create         (§5)
+retrieval smoke test               (§6)
 final summary report
 ```
+(i.e. the actual `run_embeddings.py` order: dataset → gate → model — the gate never wastes a multi-GB download on a failing dataset.)
 
-CLI/env flags to expose:
+CLI/env flags to expose (all present in `run_embeddings.py`, plus the extras marked `+`):
 - `--dataset ./hf_dataset` (default)
 - `--modality image_text|text|image` (default `image_text`)
 - `--batch-size 8` (default; auto-halves on OOM)
 - `--embed-file ./embeddings/<tag>_image_text.safetensors`
 - `--force-regenerate` (ignore existing file)
-- `--multi-image concat|primary|native` (maps to the §2 decision; default per your chosen strategy)
+- `--multi-image concat|primary|native` (maps to the §2 decision; default `primary` per the decision above)
 - `--top-k 100` (retrieval)
 - `--limit N` (optionally embed only the first N rows for a fast dry-run)
+- `+ --data ./data` (raw source dir, used ONLY to independently re-derive the C5 row order in the §4 gate)
+- `+ --tag instar_docs_v1` (stable dataset tag for the default `--embed-file` name)
+- `+ --model-path models/llama-nemotron-embed-vl-1b-v2-5b5ca69` (local snapshot dir by default; auto-downloaded if missing per the §2 availability note; an explicit foreign path is used as-is with no auto-download)
+- `+ --model-revision 5b5ca69c35bf6ec1484d2d5ff238626e67a745e2` (hub revision; ignored for a local dir)
+- `+ --part-rows 128` (rows per resumable intermediate `.safetensors` part)
+- `+ --image-cell 512` (cell px for the `concat` strategy)
+- `+ env: `HF_ENDPOINT` (primary hub, default `https://huggingface.co`) and `HF_FALLBACK_ENDPOINT` (mirror, default `https://hf-mirror.com`)
 
 The **final summary report** (printed, and written to `./embeddings/REPORT_*.md`) must contain:
 1. Device + VRAM + torch/transformers versions.
