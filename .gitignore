@@ -4,5 +4,5 @@ __pycache__
 bak*
 embeddings/
 models/
-.hf_cache/
+hf_dataset/
 .venv/
