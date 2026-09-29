@@ -1,0 +1,8 @@
+research
+data/**/
+__pycache__
+bak*
+embeddings/
+models/
+.hf_cache/
+.venv/
