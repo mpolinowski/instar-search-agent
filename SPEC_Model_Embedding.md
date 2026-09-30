@@ -265,6 +265,10 @@ Pass criteria (log a `[RETRIEVAL] PASS/FAIL` line):
 - Out-of-domain query scores are visibly lower than in-domain.
 - A single image query also runs end-to-end (use any image from `train[<i>]["images"]`) and returns a valid ranking.
 
+> This PoC is extended by the interactive TUI — `test_embeddings.py` (§9) —
+> which reuses `match_query_to_embeddings` and the model wiring *verbatim*, so
+> rankings typed into the TUI are produced by exactly this math.
+
 ---
 
 ## 7. Deliverables
@@ -327,3 +331,69 @@ The task is complete **only** when all of these are true:
 - [ ] Final report + PASS line exist.
 
 If any item cannot be satisfied (e.g. no GPU and the corpus is too large to embed on CPU in reasonable time), say so explicitly in the report and provide the exact command + expected runtime; do not silently shrink the task.
+
+---
+
+## 9. Stage 3 (optional) — interactive TUI (`test_embeddings.py`)
+
+The §6 PoC is extended into a user-facing terminal UI: **`test_embeddings.py`**.
+This is the "manual" Stage-3 row of AGENTS.md §3 — a testing tool, **not** a
+build gate: it is read-only over `./hf_dataset` + `./embeddings/`, writes
+nothing, re-embeds nothing, and trains nothing (same frozen-model discipline
+as §5.6: `torch.inference_mode`, no optimizer/loss/`model.train()`).
+
+**Prerequisite:** Stage 2 green (the §8 checklist holds) — the TUI needs both
+`./hf_dataset` and `./embeddings/instar_docs_v1_image_text.safetensors`, and
+refuses a stale/mis-shaped index with exit `2` (the §5.1 load-or-reuse gate:
+row count and dim must match, never silently trusted).
+
+**Query encoding is identical to §6 by construction.** `test_embeddings.py`
+does not reimplement model wiring — it imports and reuses, verbatim, from
+`run_embeddings.py`:
+
+| Reused from `run_embeddings.py` | Purpose |
+|---|---|
+| `EMBED_MODEL_PATH` / `EMBED_COMMIT_HASH` / `EXPECTED_DIM` / `EMBEDDING_KEY` | the pinned §2 model, the §5.4 tensor key |
+| `ensure_model_snapshot()` | skip-if-present / HF-primary / mirror-fallback (§2 availability note) — skipped when the default snapshot exists |
+| `load_embed_model(...)` | `bfloat16`, `sdpa`, `trust_remote_code`, processor wiring (`p_max_length=10240` for `image_text`, `max_input_tiles=6`, thumbnail on) |
+| `match_query_to_embeddings(...)` | the §6 cosine top-k loop — `encode_queries([...])` for text, `encode_documents(images=[...])` for images (the intentional asymmetry) |
+| `StageFailure` | hard, named failure carrying the exit code |
+
+**Startup order (fail fast, model last — a setup error never wastes the
+multi-GB load):** dataset dir + index file exist → load the dataset
+(**string columns only** — `images` is never decoded; article image *counts*
+come from the aligned `image_refs` column, C4) → load the index →
+`ensure_model_snapshot()` → `load_embed_model(...)` → ready banner.
+
+**Device:** `auto` (default) — CUDA when the torch build sees a GPU, else
+CPU (correct, just slower); force with `--device cuda|cpu`.
+
+**TUI commands:**
+
+| Input | Action |
+|---|---|
+| `<text …>` | text query → top-k table: rank, cosine + score bar, article id, title, image count, snippet |
+| `image <path>` | image query (PIL open → first frame → RGB); if `<path>` is not an existing file, the line is treated as a text query (so prose starting with "image …" still searches) |
+| `show [rank] [full]` | open the article at that rank of the last query (Markdown rendered, char-capped; `full` lifts the cap) |
+| `topk [n]` | show / set results per query (clamped to 1 … row count) |
+| `stats` | index / corpus / model / runtime / session facts (incl. image histogram) |
+| `history` / `repeat` | last 20 input lines / re-run the last query |
+| `clear` · `help`/`?` · `q`/`quit`/`exit` | misc (Ctrl-D leaves, Ctrl-C cancels the line) |
+
+**Exit codes:** `0` clean quit · `1` setup failure (dataset/index/model
+missing) · `2` index shape or row-count mismatch (stale file refused, §5.1) ·
+`3` a query rejected by the model (logged as `[RETRIEVAL] …`, the REPL keeps
+running).
+
+```bash
+# repo root, with the §1 venv:
+.venv/bin/python test_embeddings.py                # auto: GPU if visible, else CPU
+.venv/bin/python test_embeddings.py --top-k 10     # 10 results per query
+```
+
+**Logging:** `[TUI] …` lifecycle lines and one `[RETRIEVAL] mode=… top-1=… k=… in …s`
+line per query (grep-able, AGENTS.md §5.2).
+
+**Quality note (AGENTS.md §5.2):** the TUI is a manual exploration tool, not an
+eval. The §6 smoke test remains the acceptance check — use the TUI to *eyeball*
+in-domain / out-of-domain behaviour, not to claim accuracy.

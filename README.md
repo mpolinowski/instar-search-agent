@@ -67,7 +67,7 @@ Format contract the ingestion expects (details: `SPEC_Dataset_Creation.md` §2):
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install torch                      # CUDA build (verified 2.14.0+cu130)
-pip install transformers==4.57.6 datasets==5.0.1 safetensors==0.8.0
+pip install transformers==4.57.6 datasets==5.0.1 safetensors==0.8.0 rich==15.0.0
 pip install huggingface_hub==0.36.2 pillow==12.3.0 pyarrow==25.0.1 tokenizers==0.22.2
 ```
 
@@ -105,6 +105,28 @@ Verified on: Python 3.14, Linux, RTX 5090 Laptop (24 GB VRAM).
 - Exit codes: `0` green · `1` gate failed · `2` embed/row failure ·
   `3` retrieval FAIL.
 
++-------------------------------------------------------------------------------------->
+| NVIDIA-SMI 610.57.04              KMD Version: 610.57.04     CUDA UMD Version: 13.3  >
++-----------------------------------------+------------------------+------------------->
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. E>
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute >
+|                                         |                        |               MIG >
+|=========================================+========================+===================>
+|   0  NVIDIA GeForce RTX 5090 ...    Off |   00000000:65:00.0  On |                  N>
+| N/A   73C    P0             94W /   95W |   21475MiB /  24463MiB |    100%      Defau>
+|                                         |                        |                  N>
++-----------------------------------------+------------------------+------------------->
+
++-------------------------------------------------------------------------------------->
+| Processes:                                                                           >
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memo>
+|        ID   ID                                                               Usage   >
+|======================================================================================>
+|    0   N/A  N/A            1797      G   Hyprland                                  6M>
+|    0   N/A  N/A         2860978      C   .venv/bin/python                      21402M>
++-------------------------------------------------------------------------------------->
+
+
 ### 5. Folder structure you will have after both runs
 
 ```text
@@ -140,6 +162,42 @@ top = (q.float() @ d.T).topk(5).indices.tolist()
 
 Text queries: `encode_queries(...)`. Image queries: `encode_documents(images=[pil_img])`.
 (Processor wiring follows `run_embeddings.py::load_embed_model` exactly.)
+
+### 7. Test the index interactively — TUI (`test_embeddings.py`)
+
+The quickest way to *feel* how the index behaves: a terminal UI that takes
+**text queries and image queries** and prints a ranked top-k table — score,
+bar, article id, title, image count, snippet — and can open the article
+behind any rank.
+
+```bash
+.venv/bin/python test_embeddings.py              # auto: GPU if a CUDA build sees one, else CPU
+.venv/bin/python test_embeddings.py --top-k 5    # 5 results per query
+```
+
+![Test the index interactively — TUI](./images/Embedding_Knowledge_Retrieval.webp)
+
+Session sketch:
+
+```text
+instar> topk 5
+instar> Docker installation for the Agent DVR       ← text query → ranked table
+instar> show 1                                        ← open the top article (Markdown)
+instar> image data/Software_Linux_iSpy_DVR_Agent/iSpy_DVR_Agent_01.png   ← image query
+instar> stats · history · repeat · help · quit
+```
+
+- **Read-only:** uses `./hf_dataset` + `./embeddings/*.safetensors`; writes
+  nothing, re-embeds nothing, never trains (frozen Nemotron model, same
+  wiring as `run_embeddings.py` — identical query encoding to the §6 smoke test).
+- **GPU / CPU:** CUDA when your torch build sees a GPU, else CPU fallback
+  (correct, just slower — a few seconds per query). Force with
+  `--device cuda|cpu`.
+- **Exit codes:** `0` clean quit · `1` dataset/index/model not found ·
+  `2` index stale or mis-shaped (row/dim mismatch) · `3` a query was rejected
+  by the model.
+
+Contract: `SPEC_Model_Embedding.md` §9.
 
 ---
 
@@ -214,6 +272,26 @@ the multi-GB download):
 
 **No training, ever:** zero optimizer / loss / `backward()` / `model.train()`
 calls (spec §5.6; grep-verified on both scripts).
+
+### Stage 3 — `test_embeddings.py` (contract: `SPEC_Model_Embedding.md` §9)
+
+Interactive TUI over the finished index — optional, read-only, no gate:
+
+1. **Fail-fast startup** — dataset + index must exist and *agree* (row count
+   and dim mismatches are refused per §5.1; exit `2`); the dataset is read via
+   string columns only, so rows with 53 images never decode a single pixel.
+2. **Model guarantee + load** — the *same* `ensure_model_snapshot()` +
+   `load_embed_model()` calls as Stage 2, so text/image query encoding is
+   bit-identical to the §6 smoke test (`encode_queries` /
+   `encode_documents(images=...)` asymmetry preserved).
+3. **REPL** — text query → ranked top-k table (cosine + visible bar, id,
+   title, image count, snippet); `image <path>` → image query (PIL → first
+   frame → RGB); `show <rank> [full]` renders the article (Markdown, char-capped);
+   `topk n`, `stats`, `history`, `repeat`, `clear`, `help`, `quit`.
+4. **Device** — `auto` (default): CUDA when the torch build sees a GPU, else
+   CPU (correct, slower); `--device cuda|cpu` to force.
+5. **Exit codes** — `0` clean quit · `1` setup failure · `2` stale/mis-shaped
+   index · `3` query rejected (logged `[RETRIEVAL] …`, REPL continues).
 
 ---
 
